@@ -1,0 +1,1129 @@
+// src/config/constants.js
+module.exports = {
+    SCENES: {
+      REGISTRATION: 'registration',
+      MAIN_MENU: 'main_menu',
+      SETTINGS: 'settings',
+    },
+    CALLBACK_QUERIES: {
+      FILL_FORM: 'fill_form',
+      STATISTICS: 'statistics',
+      SEARCH: 'search',
+      CONTACT: 'contact',
+      CHANGE_LANGUAGE: 'change_language',
+      NOTIFICATIONS: 'notifications',
+      BACK_TO_MAIN: 'back_to_main',
+    },
+    USER_STATES: {
+      ACTIVE: 'active',
+      BLOCKED: 'blocked',
+      PENDING: 'pending',
+    },
+    LANGUAGES: {
+      UZ: 'uz',
+      RU: 'ru',
+      EN: 'en',
+    },
+    DEFAULT_LANGUAGE: 'uz',
+  };
+  
+  // src/database/index.js
+  const mongoose = require('mongoose');
+  const config = require('../config/config');
+  
+  // MongoDB ulanish uchun funksiya
+  async function connectToDatabase() {
+    try {
+      await mongoose.connect(config.DATABASE_URL, {
+        useNewUrlParser: true,
+        useUnifiedTopology: true,
+      });
+      console.log('MongoDB ulanishi muvaffaqiyatli o\'rnatildi');
+      return mongoose.connection;
+    } catch (error) {
+      console.error('MongoDB ulanishida xatolik:', error);
+      throw error;
+    }
+  }
+  
+  // Databaseni yopish uchun funksiya
+  async function closeDatabaseConnection() {
+    try {
+      await mongoose.connection.close();
+      console.log('MongoDB ulanishi yopildi');
+    } catch (error) {
+      console.error('MongoDB ulanishini yopishda xatolik:', error);
+      throw error;
+    }
+  }
+  
+  module.exports = {
+    connectToDatabase,
+    closeDatabaseConnection,
+    connection: mongoose.connection,
+  };
+  
+  // src/database/models/message.js
+  const mongoose = require('mongoose');
+  
+  const messageSchema = new mongoose.Schema({
+    userId: { 
+      type: Number, 
+      required: true,
+      ref: 'User' 
+    },
+    messageId: { 
+      type: Number 
+    },
+    chatId: { 
+      type: Number, 
+      required: true 
+    },
+    text: { 
+      type: String 
+    },
+    type: { 
+      type: String, 
+      enum: ['text', 'photo', 'video', 'document', 'sticker', 'voice', 'location', 'contact', 'other'],
+      default: 'text'
+    },
+    fileId: { 
+      type: String 
+    },
+    replyToMessageId: { 
+      type: Number 
+    },
+    forwardFromId: { 
+      type: Number 
+    },
+    createdAt: { 
+      type: Date, 
+      default: Date.now 
+    }
+  }, { timestamps: true });
+  
+  const Message = mongoose.model('Message', messageSchema);
+  
+  module.exports = Message;
+  
+  // src/middlewares/auth.js
+  const User = require('../database/models/user');
+  const { USER_STATES } = require('../config/constants');
+  
+  /**
+   * Foydalanuvchi haqiqiyligi tekshirish
+   */
+  async function auth(ctx, next) {
+    // Agar foydalanuvchi mavjud bo'lmasa, o'tkazib yuborish
+    if (!ctx.from) {
+      console.warn('Foydalanuvchi ma\'lumotlari mavjud emas');
+      return;
+    }
+    
+    try {
+      // Foydalanuvchini bazadan qidirish
+      let user = await User.findOne({ telegramId: ctx.from.id });
+      
+      // Agar foydalanuvchi topilmasa, yangi yaratish
+      if (!user) {
+        user = new User({
+          telegramId: ctx.from.id,
+          firstName: ctx.from.first_name,
+          lastName: ctx.from.last_name,
+          username: ctx.from.username,
+          languageCode: ctx.from.language_code || 'uz',
+          state: USER_STATES.ACTIVE,
+        });
+        await user.save();
+      }
+      
+      // Foydalanuvchi bloklangan bo'lsa, xabar berish
+      if (user.state === USER_STATES.BLOCKED) {
+        await ctx.reply('Sizning profilingiz bloklangan. Administrator bilan bog\'laning.');
+        return;
+      }
+      
+      // Kontekstga foydalanuvchi ma'lumotlarini qo'shish
+      ctx.dbUser = user;
+      
+      return next();
+    } catch (error) {
+      console.error('Auth middleware xatosi:', error);
+      return next();
+    }
+  }
+  
+  module.exports = {
+    auth
+  };
+  
+  // src/middlewares/logger.js
+  const Message = require('../database/models/message');
+  
+  /**
+   * Xabarlarni log qilish middleware
+   */
+  async function logger(ctx, next) {
+    const startTime = new Date();
+    
+    try {
+      // Middleware zanjirini davom ettirish
+      await next();
+      
+      // Faqat xabarlarni log qilish
+      if (ctx.message) {
+        // Ma'lumotlarni olish
+        const { from, message_id, chat, text, photo, video, document, sticker, voice, location, contact, forward_from, reply_to_message } = ctx.message;
+        
+        // Xabar turini aniqlash
+        let type = 'text';
+        let fileId = null;
+        
+        if (photo) {
+          type = 'photo';
+          fileId = photo[photo.length - 1].file_id;
+        } else if (video) {
+          type = 'video';
+          fileId = video.file_id;
+        } else if (document) {
+          type = 'document';
+          fileId = document.file_id;
+        } else if (sticker) {
+          type = 'sticker';
+          fileId = sticker.file_id;
+        } else if (voice) {
+          type = 'voice';
+          fileId = voice.file_id;
+        } else if (location) {
+          type = 'location';
+        } else if (contact) {
+          type = 'contact';
+        }
+        
+        // Xabarni saqlash
+        await Message.create({
+          userId: from.id,
+          messageId: message_id,
+          chatId: chat.id,
+          text: text || '',
+          type,
+          fileId,
+          replyToMessageId: reply_to_message ? reply_to_message.message_id : null,
+          forwardFromId: forward_from ? forward_from.id : null,
+        });
+      }
+      
+    } catch (error) {
+      console.error('Logger middleware xatosi:', error);
+    }
+    
+    // So'rovni bajarish vaqtini log qilish
+    const ms = new Date() - startTime;
+    console.log(`${ctx.from?.id || 'Unknown'} - ${ctx.updateType} - ${ms}ms`);
+  }
+  
+  module.exports = {
+    logger
+  };
+  
+  // src/scenes/mainMenu.js
+  const { Scenes } = require('telegraf');
+  const { mainMenu } = require('../keyboards/inlineKeyboards');
+  const { SCENES } = require('../config/constants');
+  
+  const mainMenuScene = new Scenes.BaseScene(SCENES.MAIN_MENU);
+  
+  mainMenuScene.enter(async (ctx) => {
+    await ctx.reply('Asosiy menyu:', mainMenu);
+  });
+  
+  mainMenuScene.action('fill_form', async (ctx) => {
+    await ctx.answerCbQuery();
+    return ctx.scene.enter(SCENES.REGISTRATION);
+  });
+  
+  mainMenuScene.action('statistics', async (ctx) => {
+    await ctx.answerCbQuery();
+    
+    // Statistika ma'lumotlarini olish
+    const User = require('../database/models/user');
+    const Message = require('../database/models/message');
+    
+    try {
+      const userCount = await User.countDocuments();
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      
+      const newUsersToday = await User.countDocuments({
+        createdAt: { $gte: todayStart }
+      });
+      
+      const messageCount = await Message.countDocuments();
+      
+      await ctx.reply(`📊 Statistika:\n\n` +
+        `👥 Jami foydalanuvchilar: ${userCount}\n` +
+        `🆕 Bugun qo'shilgan: ${newUsersToday}\n` +
+        `💬 Jami xabarlar: ${messageCount}`
+      );
+    } catch (error) {
+      console.error('Statistika olishda xato:', error);
+      await ctx.reply('Statistika ma\'lumotlarini olishda xatolik yuz berdi');
+    }
+  });
+  
+  mainMenuScene.action('search', async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.reply('Qidiruv funksiyasi tez orada qo\'shiladi!');
+  });
+  
+  mainMenuScene.action('contact', async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.reply('📞 Bog\'lanish uchun:\n\n' +
+      'Telefon: +998901234567\n' +
+      'Email: example@example.com\n' +
+      'Telegram: @username');
+  });
+  
+  mainMenuScene.on('message', async (ctx) => {
+    const text = ctx.message.text;
+    
+    if (text === '📋 Asosiy menyu') {
+      return ctx.scene.reenter();
+    } else if (text === 'ℹ️ Ma\'lumot') {
+      await ctx.reply('Bot haqida ma\'lumot:\n\n' +
+        'Bu bot sizga quyidagi imkoniyatlarni beradi:\n' +
+        '- Ro\'yxatdan o\'tish\n' +
+        '- Ma\'lumotlarni saqlash\n' +
+        '- Statistikani ko\'rish\n' +
+        '- va boshqalar...'
+      );
+    } else if (text === '⚙️ Sozlamalar') {
+      return ctx.scene.enter(SCENES.SETTINGS);
+    } else {
+      await ctx.reply('Iltimos, mavjud tugmalardan foydalaning');
+    }
+  });
+  
+  module.exports = mainMenuScene;
+  
+  // src/scenes/index.js
+  const { Scenes } = require('telegraf');
+  const registrationScene = require('./registration');
+  const mainMenuScene = require('./mainMenu');
+  const settingsScene = require('./settings');
+  
+  function setupScenes() {
+    const stage = new Scenes.Stage([
+      registrationScene,
+      mainMenuScene,
+      settingsScene
+    ]);
+    
+    return stage;
+  }
+  
+  module.exports = {
+    setupScenes
+  };
+  
+  // src/scenes/settings.js
+  const { Scenes } = require('telegraf');
+  const { settingsMenu } = require('../keyboards/inlineKeyboards');
+  const { SCENES, LANGUAGES } = require('../config/constants');
+  const User = require('../database/models/user');
+  
+  const settingsScene = new Scenes.BaseScene(SCENES.SETTINGS);
+  
+  settingsScene.enter(async (ctx) => {
+    await ctx.reply('⚙️ Sozlamalar:', settingsMenu);
+  });
+  
+  settingsScene.action('change_language', async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.reply('🌐 Tilni tanlang:', {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '🇺🇿 O\'zbek', callback_data: `lang_${LANGUAGES.UZ}` },
+            { text: '🇷🇺 Русский', callback_data: `lang_${LANGUAGES.RU}` },
+            { text: '🇬🇧 English', callback_data: `lang_${LANGUAGES.EN}` }
+          ]
+        ]
+      }
+    });
+  });
+  
+  settingsScene.action(/^lang_(.+)$/, async (ctx) => {
+    const language = ctx.match[1];
+    
+    try {
+      // Foydalanuvchi tilini yangilash
+      await User.findOneAndUpdate(
+        { telegramId: ctx.from.id },
+        { languageCode: language }
+      );
+      
+      let message = 'Til muvaffaqiyatli o\'zgartirildi!';
+      if (language === LANGUAGES.RU) {
+        message = 'Язык успешно изменен!';
+      } else if (language === LANGUAGES.EN) {
+        message = 'Language has been successfully changed!';
+      }
+      
+      await ctx.answerCbQuery(message);
+      await ctx.reply(message);
+      
+      // Sozlamalar menyusiga qaytish
+      await ctx.scene.reenter();
+    } catch (error) {
+      console.error('Tilni o\'zgartirishda xato:', error);
+      await ctx.answerCbQuery('Xatolik yuz berdi');
+      await ctx.reply('Tilni o\'zgartirishda xatolik yuz berdi');
+    }
+  });
+  
+  settingsScene.action('notifications', async (ctx) => {
+    await ctx.answerCbQuery();
+    
+    try {
+      const user = await User.findOne({ telegramId: ctx.from.id });
+      const newNotificationState = !user.notificationsEnabled;
+      
+      await User.findOneAndUpdate(
+        { telegramId: ctx.from.id },
+        { notificationsEnabled: newNotificationState }
+      );
+      
+      const stateText = newNotificationState ? 'yoqildi' : 'o\'chirildi';
+      await ctx.reply(`Bildirishnomalar ${stateText}!`);
+      
+      // Sozlamalar menyusiga qaytish
+      await ctx.scene.reenter();
+    } catch (error) {
+      console.error('Bildirishnomalarni o\'zgartirishda xato:', error);
+      await ctx.reply('Bildirishnomalarni o\'zgartirishda xatolik yuz berdi');
+    }
+  });
+  
+  settingsScene.action('back_to_main', async (ctx) => {
+    await ctx.answerCbQuery();
+    return ctx.scene.enter(SCENES.MAIN_MENU);
+  });
+  
+  settingsScene.on('message', async (ctx) => {
+    if (ctx.message.text === '📋 Asosiy menyu') {
+      return ctx.scene.enter(SCENES.MAIN_MENU);
+    } else {
+      await ctx.reply('Iltimos, mavjud tugmalardan foydalaning');
+    }
+  });
+  
+  module.exports = settingsScene;
+  
+  // src/services/analytics.js
+  const User = require('../database/models/user');
+  const Message = require('../database/models/message');
+  
+  /**
+   * Umumiy statistikani olish
+   */
+  async function getGeneralStatistics() {
+    try {
+      const totalUsers = await User.countDocuments();
+      const activeUsers = await User.countDocuments({ state: 'active' });
+      
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      
+      const newUsersToday = await User.countDocuments({
+        createdAt: { $gte: today }
+      });
+      
+      const totalMessages = await Message.countDocuments();
+      const messagesPerUser = totalUsers > 0 ? (totalMessages / totalUsers).toFixed(2) : 0;
+      
+      return {
+        totalUsers,
+        activeUsers,
+        newUsersToday,
+        totalMessages,
+        messagesPerUser
+      };
+    } catch (error) {
+      console.error('Statistika olishda xato:', error);
+      throw error;
+    }
+  }
+  
+  /**
+   * So'nggi N kun uchun foydalanuvchi o'sishini olish
+   */
+  async function getUserGrowth(days = 7) {
+    try {
+      const results = [];
+      
+      for (let i = 0; i < days; i++) {
+        const date = new Date();
+        date.setDate(date.getDate() - i);
+        date.setHours(0, 0, 0, 0);
+        
+        const nextDay = new Date(date);
+        nextDay.setDate(nextDay.getDate() + 1);
+        
+        const count = await User.countDocuments({
+          createdAt: { $gte: date, $lt: nextDay }
+        });
+        
+        results.unshift({
+          date: date.toISOString().split('T')[0],
+          count
+        });
+      }
+      
+      return results;
+    } catch (error) {
+      console.error('Foydalanuvchi o\'sishini olishda xato:', error);
+      throw error;
+    }
+  }
+  
+  module.exports = {
+    getGeneralStatistics,
+    getUserGrowth
+  };
+  
+  // src/services/api.js
+  const axios = require('axios');
+  const config = require('../config/config');
+  
+  /**
+   * Umumiy API so'rovlari uchun wrapper funksiya
+   */
+  async function makeRequest(method, url, data = null, headers = {}) {
+    try {
+      const response = await axios({
+        method,
+        url,
+        data,
+        headers: {
+          'Content-Type': 'application/json',
+          ...headers
+        },
+        timeout: 10000 // 10 sekund
+      });
+      
+      return response.data;
+    } catch (error) {
+      console.error('API so\'rovida xato:', error.message);
+      
+      // Xato javobni qaytarish
+      if (error.response) {
+        return {
+          error: true,
+          status: error.response.status,
+          message: error.response.data?.message || error.message
+        };
+      }
+      
+      return {
+        error: true,
+        message: error.message
+      };
+    }
+  }
+  
+  /**
+   * Tashqi API bilan ishlash uchun servis
+   */
+  const apiService = {
+    get: (url, headers) => makeRequest('GET', url, null, headers),
+    post: (url, data, headers) => makeRequest('POST', url, data, headers),
+    put: (url, data, headers) => makeRequest('PUT', url, data, headers),
+    delete: (url, headers) => makeRequest('DELETE', url, null, headers)
+  };
+  
+  module.exports = apiService;
+  
+  // src/utils/formatters.js
+  /**
+   * Sana va vaqtni formatlash
+   * @param {Date} date - Sana obyekti
+   * @param {boolean} includeTime - Vaqtni ham qo'shish
+   * @returns {string} Formatlangan sana
+   */
+  function formatDate(date, includeTime = false) {
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const year = date.getFullYear();
+    
+    let formatted = `${day}.${month}.${year}`;
+    
+    if (includeTime) {
+      const hours = String(date.getHours()).padStart(2, '0');
+      const minutes = String(date.getMinutes()).padStart(2, '0');
+      formatted += ` ${hours}:${minutes}`;
+    }
+    
+    return formatted;
+  }
+  
+  /**
+   * Raqamni chiroyli formatlash (minglik ajratuvchi bilan)
+   * @param {number} num - Raqam
+   * @returns {string} Formatlangan raqam
+   */
+  function formatNumber(num) {
+    return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  }
+  
+  /**
+   * Telefon raqamni formatlash
+   * @param {string} phoneNumber - Telefon raqami
+   * @returns {string} Formatlangan telefon raqami
+   */
+  function formatPhoneNumber(phoneNumber) {
+    // +998901234567 formatidan +998 90 123-45-67 formatiga o'tkazish
+    if (!phoneNumber) return '';
+    
+    phoneNumber = phoneNumber.replace(/\D/g, '');
+    
+    if (phoneNumber.length === 12 && phoneNumber.startsWith('998')) {
+      return `+${phoneNumber.substring(0, 3)} ${phoneNumber.substring(3, 5)} ${phoneNumber.substring(5, 8)}-${phoneNumber.substring(8, 10)}-${phoneNumber.substring(10, 12)}`;
+    }
+    
+    return phoneNumber;
+  }
+  
+  module.exports = {
+    formatDate,
+    formatNumber,
+    formatPhoneNumber
+  };
+  
+  // src/utils/helpers.js
+  const crypto = require('crypto');
+  
+  /**
+   * Xavfsiz tasodifiy ID yaratish
+   * @param {number} length - ID uzunligi
+   * @returns {string} Tasodifiy ID
+   */
+  function generateRandomId(length = 10) {
+    return crypto.randomBytes(Math.ceil(length / 2))
+      .toString('hex')
+      .slice(0, length);
+  }
+  
+  /**
+   * Matndagi maxsus belgilarni HTML uchun xavfsiz belgilarga o'zgartirish
+   * @param {string} text - Matn
+   * @returns {string} Xavfsiz matn
+   */
+  function escapeHTML(text) {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+  
+  /**
+   * Taalluqli vaqt formatiga o'zgartirish
+   * @param {Date} date - Sana
+   * @returns {string} Taalluqli vaqt matni
+   */
+  function timeAgo(date) {
+    const seconds = Math.floor((new Date() - date) / 1000);
+    
+    const intervals = {
+      yil: 31536000,
+      oy: 2592000,
+      hafta: 604800,
+      kun: 86400,
+      soat: 3600,
+      minut: 60,
+      sekund: 1
+    };
+    
+    for (const [unit, secondsInUnit] of Object.entries(intervals)) {
+      const interval = Math.floor(seconds / secondsInUnit);
+      
+      if (interval > 1) {
+        return `${interval} ${unit} oldin`;
+      } else if (interval === 1) {
+        return `1 ${unit} oldin`;
+      }
+    }
+    
+    return 'hozirgina';
+  }
+  
+  /**
+   * Matn uzunligini cheklash
+   * @param {string} text - Matn
+   * @param {number} maxLength - Maksimal uzunlik
+   * @returns {string} Qisqartirilgan matn
+   */
+  function truncateText(text, maxLength = 100) {
+    if (!text || text.length <= maxLength) {
+      return text;
+    }
+    
+    return text.substring(0, maxLength - 3) + '...';
+  }
+  
+  module.exports = {
+    generateRandomId,
+    escapeHTML,
+    timeAgo,
+    truncateText
+  };
+  
+  // src/keyboards/replyKeyboards.js
+  module.exports = {
+    mainKeyboard: {
+      reply_markup: {
+        keyboard: [
+          [{ text: '📋 Asosiy menyu' }],
+          [{ text: 'ℹ️ Ma\'lumot' }, { text: '⚙️ Sozlamalar' }]
+        ],
+        resize_keyboard: true
+      }
+    },
+    
+    contactKeyboard: {
+      reply_markup: {
+        keyboard: [
+          [{ text: '📱 Telefon raqamni yuborish', request_contact: true }],
+          [{ text: '⬅️ Orqaga' }]
+        ],
+        resize_keyboard: true,
+        one_time_keyboard: true
+      }
+    },
+    
+    removeKeyboard: {
+      reply_markup: {
+        remove_keyboard: true
+      }
+    }
+  };
+  
+  // src/commands/help.js
+  module.exports = (bot) => {
+    bot.command('help', async (ctx) => {
+      try {
+        await ctx.reply(
+          'Bot bo\'yicha yordam:\n\n' +
+          '/start - Botni qayta ishga tushirish\n' +
+          '/help - Yordam ko\'rsatish\n' +
+          '/settings - Sozlamalarni ochish\n\n' +
+          'Qo\'shimcha savollar uchun administrator bilan bog\'laning.'
+        );
+      } catch (error) {
+        console.error('Help buyrug\'i xatosi:', error);
+        ctx.reply('Xatolik yuz berdi. Iltimos, keyinroq qayta urinib ko\'ring.');
+      }
+    });
+  };
+  
+  // src/commands/settings.js
+  const { SCENES } = require('../config/constants');
+  
+  module.exports = (bot) => {
+    bot.command('settings', async (ctx) => {
+      try {
+        return ctx.scene.enter(SCENES.SETTINGS);
+      } catch (error) {
+        console.error('Settings buyrug\'i xatosi:', error);
+        ctx.reply('Xatolik yuz berdi. Iltimos, keyinroq qayta urinib ko\'ring.');
+      }
+    });
+  };
+  
+  // src/commands/index.js
+  const startCommand = require('./start');
+  const helpCommand = require('./help');
+  const settingsCommand = require('./settings');
+  
+  function registerCommands(bot) {
+    startCommand(bot);
+    helpCommand(bot);
+    settingsCommand(bot);
+    
+    // Admin buyruqlari
+    bot.command('stats', async (ctx) => {
+      const config = require('../config/config');
+      const analytics = require('../services/analytics');
+      
+      // Faqat adminlar uchun
+      if (!config.ADMIN_IDS.includes(ctx.from.id)) {
+        return;
+      }
+      
+      try {
+        const stats = await analytics.getGeneralStatistics();
+        
+        await ctx.reply(
+          '📊 Bot statistikasi:\n\n' +
+          `👥 Jami foydalanuvchilar: ${stats.totalUsers}\n` +
+          `✅ Faol foydalanuvchilar: ${stats.activeUsers}\n` +
+          `🆕 Bugun qo'shilgan: ${stats.newUsersToday}\n` +
+          `💬 Jami xabarlar: ${stats.totalMessages}\n` +
+          `📈 Xabar/Foydalanuvchi: ${stats.messagesPerUser}`
+        );
+      } catch (error) {
+        console.error('Stats buyrug\'i xatosi:', error);
+        ctx.reply('Statistikani olishda xatolik yuz berdi.');
+      }
+    });
+    
+    // Broadcast buyrug'i (admin uchun)
+    bot.command('broadcast', async (ctx) => {
+      const config = require('../config/config');
+      const User = require('../database/models/user');
+      
+      // Faqat adminlar uchun
+      if (!config.ADMIN_IDS.includes(ctx.from.id)) {
+        return;
+      }
+      
+      const messageText = ctx.message.text.split('/broadcast ')[1];
+      
+      if (!messageText) {
+        return ctx.reply('Foydalanish: /broadcast <xabar matni>');
+      }
+      
+      try {
+        // Barcha faol foydalanuvchilarni olish
+        const users = await User.find({ state: 'active' });
+        
+        let successCount = 0;
+        let errorCount = 0;
+        
+        for (const user of users) {
+          try {
+            await ctx.telegram.sendMessage(user.telegramId, messageText, { parse_mode: 'HTML' });
+            successCount++;
+          } catch (err) {
+            errorCount++;
+            console.error(`Broadcast xatosi (${user.telegramId}):`, err.message);
+          }
+          
+          // Telegram cheklovlaridan qochish uchun kichik kutish
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        
+        await ctx.reply(
+          `✅ Broadcast yakunlandi:\n\n` +
+          `📨 Yuborilgan: ${successCount}\n` +
+          `❌ Xatoliklar: ${errorCount}\n` +
+          `👥 Jami: ${users.length}`
+        );
+      } catch (error) {
+        console.error('Broadcast buyrug\'i xatosi:', error);
+        ctx.reply('Broadcast qilishda xatolik yuz berdi.');
+      }
+    });
+  }
+  
+  module.exports = {
+    registerCommands
+  };
+  
+  // src/handlers/messageHandler.js
+  const { SCENES } = require('../config/constants');
+  
+  /**
+   * Xabarlarni qayta ishlash uchun asosiy handler
+   */
+  async function messageHandler(ctx) {
+    // Agar scene faol bo'lsa, u qayta ishlaydi
+    if (ctx.scene && ctx.scene.current) {
+      return;
+    }
+    
+    const text = ctx.message.text;
+    
+    // Asosiy menyu tugmasi
+    if (text === '📋 Asosiy menyu') {
+      return ctx.scene.enter(SCENES.MAIN_MENU);
+    }
+    
+    // Ma'lumot tugmasi
+    else if (text === 'ℹ️ Ma\'lumot') {
+      await ctx.reply('Bot haqida ma\'lumot:\n\n' +
+        'Bu bot sizga quyidagi imkoniyatlarni beradi:\n' +
+        '- Ro\'yxatdan o\'tish\n' +
+        '- Ma\'lumotlarni saqlash\n' +
+        '- Statistikani ko\'rish\n' +
+        '- va boshqalar...'
+      );
+    }
+    
+    // Sozlamalar tugmasi
+    else if (text === '⚙️ Sozlamalar') {
+      return ctx.scene.enter(SCENES.SETTINGS);
+    }
+    
+    // Boshqa barcha xabarlar uchun
+    else {
+      // Agar foydalanuvchi ro'yxatdan o'tmagan bo'lsa
+      if (ctx.dbUser && !ctx.dbUser.isRegistered) {
+        await ctx.reply('Iltimos, avval ro\'yxatdan o\'ting:', {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '📝 Ro\'yxatdan o\'tish', callback_data: 'register' }]
+            ]
+          }
+        });
+        return;
+      }
+      
+      // Standart xabar uchun javob
+      await ctx.reply('Kerakli bo\'limni tanlang:', {
+        reply_markup: {
+          keyboard: [
+            [{ text: '📋 Asosiy menyu' }],
+            [{ text: 'ℹ️ Ma\'lumot' }, { text: '⚙️ Sozlamalar' }]
+          ],
+          resize_keyboard: true
+        }
+      });
+    }
+  }
+  
+  module.exports = messageHandler;
+  
+  // src/handlers/callbackHandler.js
+  const { SCENES } = require('../config/constants');
+  
+  /**
+   * Inline tugmalar bosilgandagi hodisalarni qayta ishlash
+   */
+  async function callbackHandler(ctx) {
+    try {
+      const callbackData = ctx.callbackQuery.data;
+      
+      // Agar scene faol bo'lsa, u qayta ishlaydi
+      if (ctx.scene && ctx.scene.current) {
+        return;
+      }
+      
+      // Ro'yxatdan o'tish tugmasi
+      if (callbackData === 'register') {
+        await ctx.answerCbQuery();
+        return ctx.scene.enter(SCENES.REGISTRATION);
+      }
+      
+      // Asosiy menyuga o'tish
+      else if (callbackData === 'main_menu') {
+        await ctx.answerCbQuery();
+        return ctx.scene.enter(SCENES.MAIN_MENU);
+      }
+      
+      // Boshqa barcha callback hodisalari uchun
+      else {
+        await ctx.answerCbQuery('Bu funksiya hozircha mavjud emas');
+      }
+    } catch (error) {
+      console.error('Callback handler xatosi:', error);
+      await ctx.answerCbQuery('Xatolik yuz berdi');
+    }
+  }
+  
+  module.exports = callbackHandler;
+  
+  // src/locales/uz.js
+  module.exports = {
+    welcome: 'Assalomu alaykum, {name}! Botimizga xush kelibsiz.',
+    mainMenu: 'Asosiy menyu:',
+    settings: 'Sozlamalar:',
+    languageChanged: 'Til muvaffaqiyatli o\'zgartirildi!',
+    enterName: 'Ismingizni kiriting:',
+    enterSurname: 'Familiyangizni kiriting:',
+    enterPhone: 'Telefon raqamingizni kiriting:',
+    registrationSuccess: 'Tabriklaymiz! Ro\'yxatdan muvaffaqiyatli o\'tdingiz.',
+    error: 'Xatolik yuz berdi. Iltimos, keyinroq qayta urinib ko\'ring.',
+    botInfo: 'Bot haqida ma\'lumot:\n\nBu bot sizga quyidagi imkoniyatlarni beradi:\n- Ro\'yxatdan o\'tish\n- Ma\'lumotlarni saqlash\n- Statistikani ko\'rish\n- va boshqalar...',
+    statistics: '📊 Statistika:\n\n👥 Jami foydalanuvchilar: {userCount}\n🆕 Bugun qo\'shilgan: {newUsers}\n💬 Jami xabarlar: {messageCount}',
+    useButtons: 'Iltimos, mavjud tugmalardan foydalaning',
+    contactInfo: '📞 Bog\'lanish uchun:\n\nTelefon: +998901234567\nEmail: example@example.com\nTelegram: @username',
+    notificationOn: 'Bildirishnomalar yoqildi!',
+    notificationOff: 'Bildirishnomalar o\'chirildi!',
+    helpCommand: 'Bot bo\'yicha yordam:\n\n/start - Botni qayta ishga tushirish\n/help - Yordam ko\'rsatish\n/settings - Sozlamalarni ochish\n\nQo\'shimcha savollar uchun administrator bilan bog\'laning.',
+    adminRequired: 'Bu buyruq faqat adminlar uchun.',
+    broadcastUsage: 'Foydalanish: /broadcast <xabar matni>',
+    broadcastComplete: '✅ Broadcast yakunlandi:\n\n📨 Yuborilgan: {success}\n❌ Xatoliklar: {error}\n👥 Jami: {total}',
+    featureNotAvailable: 'Bu funksiya hozircha mavjud emas',
+    botStarted: '🚀 Bot ishga tushdi!',
+    botStopped: 'Bot to\'xtatildi',
+    pleaseRegister: 'Iltimos, avval ro\'yxatdan o\'ting:',
+    selectSection: 'Kerakli bo\'limni tanlang:',
+    blocked: 'Sizning profilingiz bloklangan. Administrator bilan bog\'laning.',
+  };
+  
+  // src/locales/ru.js
+  module.exports = {
+    welcome: 'Здравствуйте, {name}! Добро пожаловать в наш бот.',
+    mainMenu: 'Главное меню:',
+    settings: 'Настройки:',
+    languageChanged: 'Язык успешно изменен!',
+    enterName: 'Введите ваше имя:',
+    enterSurname: 'Введите вашу фамилию:',
+    enterPhone: 'Введите ваш номер телефона:',
+    registrationSuccess: 'Поздравляем! Вы успешно зарегистрировались.',
+    error: 'Произошла ошибка. Пожалуйста, попробуйте позже.',
+    botInfo: 'Информация о боте:\n\nЭтот бот предоставляет вам следующие возможности:\n- Регистрация\n- Сохранение данных\n- Просмотр статистики\n- и другие...',
+    statistics: '📊 Статистика:\n\n👥 Всего пользователей: {userCount}\n🆕 Добавлено сегодня: {newUsers}\n💬 Всего сообщений: {messageCount}',
+    useButtons: 'Пожалуйста, используйте доступные кнопки',
+    contactInfo: '📞 Для связи:\n\nТелефон: +998901234567\nEmail: example@example.com\nTelegram: @username',
+    notificationOn: 'Уведомления включены!',
+    notificationOff: 'Уведомления выключены!',
+    helpCommand: 'Помощь по боту:\n\n/start - Перезапустить бота\n/help - Показать помощь\n/settings - Открыть настройки\n\nДля дополнительных вопросов обратитесь к администратору.',
+    adminRequired: 'Эта команда только для администраторов.',
+    broadcastUsage: 'Использование: /broadcast <текст сообщения>',
+    broadcastComplete: '✅ Рассылка завершена:\n\n📨 Отправлено: {success}\n❌ Ошибки: {error}\n👥 Всего: {total}',
+    featureNotAvailable: 'Эта функция пока недоступна',
+    botStarted: '🚀 Бот запущен!',
+    botStopped: 'Бот остановлен',
+    pleaseRegister: 'Пожалуйста, сначала зарегистрируйтесь:',
+    selectSection: 'Выберите нужный раздел:',
+    blocked: 'Ваш профиль заблокирован. Свяжитесь с администратором.',
+  };
+  
+  // src/locales/en.js
+  module.exports = {
+    welcome: 'Hello, {name}! Welcome to our bot.',
+    mainMenu: 'Main menu:',
+    settings: 'Settings:',
+    languageChanged: 'Language has been successfully changed!',
+    enterName: 'Enter your name:',
+    enterSurname: 'Enter your surname:',
+    enterPhone: 'Enter your phone number:',
+    registrationSuccess: 'Congratulations! You have successfully registered.',
+    error: 'An error occurred. Please try again later.',
+    botInfo: 'Bot information:\n\nThis bot provides you with the following features:\n- Registration\n- Data storage\n- View statistics\n- and others...',
+    statistics: '📊 Statistics:\n\n👥 Total users: {userCount}\n🆕 Added today: {newUsers}\n💬 Total messages: {messageCount}',
+    useButtons: 'Please use the available buttons',
+    contactInfo: '📞 Contact information:\n\nPhone: +998901234567\nEmail: example@example.com\nTelegram: @username',
+    notificationOn: 'Notifications are enabled!',
+    notificationOff: 'Notifications are disabled!',
+    helpCommand: 'Bot help:\n\n/start - Restart the bot\n/help - Show help\n/settings - Open settings\n\nFor additional questions, contact the administrator.',
+    adminRequired: 'This command is for administrators only.',
+    broadcastUsage: 'Usage: /broadcast <message text>',
+    broadcastComplete: '✅ Broadcast completed:\n\n📨 Sent: {success}\n❌ Errors: {error}\n👥 Total: {total}',
+    featureNotAvailable: 'This feature is not yet available',
+    botStarted: '🚀 Bot started!',
+    botStopped: 'Bot stopped',
+    pleaseRegister: 'Please register first:',
+    selectSection: 'Select the desired section:',
+    blocked: 'Your profile is blocked. Contact the administrator.',
+  };
+  
+  // .env fayl namunasi
+  /*
+  BOT_TOKEN=1234567890:ABCDEFGhijklmnopqrstuvwxyz123456789
+  ADMIN_IDS=123456789,987654321
+  DATABASE_URL=mongodb://localhost:27017/telegram_bot
+  NODE_ENV=development
+  LOG_LEVEL=info
+  */
+  
+  // package.json
+  /*
+  {
+    "name": "telegram-bot",
+    "version": "1.0.0",
+    "description": "Telegram bot with Telegraf.js",
+    "main": "src/index.js",
+    "scripts": {
+      "start": "node src/index.js",
+      "dev": "nodemon src/index.js",
+      "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "keywords": [
+      "telegram",
+      "bot",
+      "telegraf",
+      "nodejs"
+    ],
+    "author": "",
+    "license": "ISC",
+    "dependencies": {
+      "axios": "^1.6.2",
+      "dotenv": "^16.0.3",
+      "moment": "^2.29.4",
+      "mongoose": "^7.0.3",
+      "telegraf": "^4.12.2"
+    },
+    "devDependencies": {
+      "nodemon": "^2.0.22"
+    }
+  }
+  */
+  
+  // README.md
+  /*
+  # Telegram Bot
+  
+  This is a Telegram bot built with Telegraf.js and MongoDB.
+  
+  ## Features
+  
+  - User registration
+  - Admin notifications
+  - Statistics
+  - Multilingual support
+  - Scenes for complex dialogs
+  - Keyboard interfaces
+  
+  ## Installation
+  
+  1. Clone the repository
+  2. Install dependencies: `npm install`
+  3. Create a `.env` file with the required environment variables
+  4. Start the bot: `npm start`
+  
+  ## Environment Variables
+  
+  - `BOT_TOKEN`: Your Telegram bot token from BotFather
+  - `ADMIN_IDS`: Comma-separated list of admin Telegram IDs
+  - `DATABASE_URL`: MongoDB connection string
+  - `NODE_ENV`: Environment (development/production)
+  - `LOG_LEVEL`: Logging level
+  
+  ## Project Structure
+  
+  - `src/`: Source code
+    - `config/`: Configuration files
+    - `database/`: Database connection and models
+    - `middlewares/`: Middleware functions
+    - `scenes/`: Telegraf scenes for multi-step dialogs
+    - `services/`: Business logic services
+    - `utils/`: Utility functions
+    - `keyboards/`: Keyboard layouts
+    - `commands/`: Bot command handlers
+    - `handlers/`: Event handlers
+    - `locales/`: Multilingual support
+    - `index.js`: Main entry point
+  
+  ## Commands
+  
+  - `/start` - Start the bot
+  - `/help` - Show help information
+  - `/settings` - Open settings menu
+  - `/stats` - Show statistics (admin only)
+  - `/broadcast` - Send message to all users (admin only)
+  
+  ## License
+  
+  ISC
+  */
+
+
+npm install telegraf
+npm install dotenv
+npm install mongoose
+npm install axios
